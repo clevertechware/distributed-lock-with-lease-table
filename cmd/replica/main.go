@@ -16,28 +16,54 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/clevertechware/distributed-lock-with-lease-table/internal/advisory"
 	"github.com/clevertechware/distributed-lock-with-lease-table/internal/lease"
 	"github.com/clevertechware/distributed-lock-with-lease-table/internal/scheduler"
+	"github.com/clevertechware/distributed-lock-with-lease-table/pkg/lock"
 )
 
 // defaultDSN points at the throwaway PostgreSQL started by `make demo-db`.
 const defaultDSN = "postgres://demo:demo@localhost:5432/demo?sslmode=disable"
+
+// mode is the implementation the replica runs under: the lease, or the session advisory lock it
+// replaces. Running the demonstration twice, once in each mode, is the whole point of the binary.
+type mode string
+
+const (
+	leaseMode    mode = "lease"
+	advisoryMode mode = "advisory"
+)
+
+func parseMode(name string) (mode, error) {
+	switch selected := mode(name); selected {
+	case leaseMode, advisoryMode:
+		return selected, nil
+	default:
+		return "", fmt.Errorf("unknown locker %q, expected %q or %q", name, leaseMode, advisoryMode)
+	}
+}
 
 // config is the shape of the demonstration: everything is short, so that a takeover happens while
 // the reader is still watching.
 type config struct {
 	name     string
 	job      string
+	locker   mode
 	lease    time.Duration
 	interval time.Duration
 	work     time.Duration
 }
 
 func main() {
-	cfg := parseFlags()
+	cfg, err := parseFlags()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil)).With(slog.String("replica", cfg.name))
 
-	if err := run(cfg, logger); err != nil {
+	if err = run(cfg, logger); err != nil {
 		logger.Error("replica stopped", slog.String("error", err.Error()))
 		os.Exit(1)
 	}
@@ -45,17 +71,24 @@ func main() {
 	logger.Info("replica stopped")
 }
 
-func parseFlags() config {
-	cfg := config{}
+func parseFlags() (config, error) {
+	cfg, locker := config{}, ""
 
 	flag.StringVar(&cfg.name, "name", hostname(), "identity of this replica, and holder of the lease")
 	flag.StringVar(&cfg.job, "job", "invoices", "key of the job the replicas compete for")
+	flag.StringVar(&locker, "locker", string(leaseMode), "lease, or advisory for the faulty implementation")
 	flag.DurationVar(&cfg.lease, "lease", 6*time.Second, "how long a lease covers its holder")
 	flag.DurationVar(&cfg.interval, "interval", 2*time.Second, "how often a replica tries to claim the job")
 	flag.DurationVar(&cfg.work, "work", 5*time.Second, "how long the job takes")
 	flag.Parse()
 
-	return cfg
+	selected, err := parseMode(locker)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.locker = selected
+
+	return cfg, nil
 }
 
 func run(cfg config, logger *slog.Logger) error {
@@ -71,19 +104,36 @@ func run(cfg config, logger *slog.Logger) error {
 	if err = db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to reach postgres: %w", err)
 	}
-	if err = lease.Migrate(ctx, db); err != nil {
-		return fmt.Errorf("failed to migrate the lease table: %w", err)
+	locker, err := newLocker(ctx, cfg, db, logger)
+	if err != nil {
+		return err
 	}
 
-	locker := lease.NewLocker(db,
-		lease.WithHolder(cfg.name), lease.WithDuration(cfg.lease), lease.WithLogger(logger))
-
-	logger.InfoContext(ctx, "replica started", slog.String("job", cfg.job), slog.Duration("lease", cfg.lease))
+	logger.InfoContext(ctx, "replica started",
+		slog.String("job", cfg.job), slog.String("locker", string(cfg.locker)))
 
 	scheduler.New(locker, cfg.job, work(cfg.work),
 		scheduler.WithInterval(cfg.interval), scheduler.WithLogger(logger)).Run(ctx)
 
 	return nil
+}
+
+func newLocker(ctx context.Context, cfg config, db *sql.DB, logger *slog.Logger) (lock.Locker, error) {
+	if cfg.locker == advisoryMode {
+		// The defect of the session advisory lock only surfaces once the pool recycles the connection
+		// holding the lock, which every deployment does at the end of ConnMaxLifetime. One tick is
+		// short enough for the reader to watch it happen.
+		db.SetConnMaxLifetime(cfg.interval)
+
+		return advisory.NewSessionLocker(db), nil
+	}
+
+	if err := lease.Migrate(ctx, db); err != nil {
+		return nil, fmt.Errorf("failed to migrate the lease table: %w", err)
+	}
+
+	return lease.NewLocker(db,
+		lease.WithHolder(cfg.name), lease.WithDuration(cfg.lease), lease.WithLogger(logger)), nil
 }
 
 // work stands for the job that must not run twice at the same time. Sleeping is enough: what the

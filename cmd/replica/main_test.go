@@ -8,6 +8,21 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestBothImplementationsOfTheArticleAreSelectable(t *testing.T) {
+	for _, name := range []string{"lease", "advisory"} {
+		selected, err := parseMode(name)
+
+		assert.NoError(t, err)
+		assert.Equal(t, mode(name), selected)
+	}
+}
+
+func TestAnUnknownLockerIsRejectedBeforeTheReplicaConnects(t *testing.T) {
+	_, err := parseMode("redis")
+
+	assert.ErrorContains(t, err, `unknown locker "redis"`)
+}
+
 func TestWorkStopsAsSoonAsTheReplicaIsShutDown(t *testing.T) {
 	ctx, shutdown := context.WithCancel(t.Context())
 	done := make(chan error, 1)
