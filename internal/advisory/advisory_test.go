@@ -13,7 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/clevertechware/distributed-lock-with-lease-table/internal/lock"
+	"github.com/clevertechware/distributed-lock-with-lease-table/pkg/lock"
+
 	"github.com/clevertechware/distributed-lock-with-lease-table/internal/pgtest"
 )
 
