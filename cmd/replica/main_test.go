@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBothImplementationsOfTheArticleAreSelectable(t *testing.T) {
@@ -21,6 +24,13 @@ func TestAnUnknownLockerIsRejectedBeforeTheReplicaConnects(t *testing.T) {
 	_, err := parseMode("redis")
 
 	assert.ErrorContains(t, err, `unknown locker "redis"`)
+}
+
+func TestTheDefaultNameSetsTwoReplicasOfTheSameMachineApart(t *testing.T) {
+	host, err := os.Hostname()
+	require.NoError(t, err)
+
+	assert.Equal(t, fmt.Sprintf("%s-%d", host, os.Getpid()), defaultName())
 }
 
 func TestWorkStopsAsSoonAsTheReplicaIsShutDown(t *testing.T) {

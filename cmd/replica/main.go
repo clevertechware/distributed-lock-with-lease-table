@@ -74,7 +74,7 @@ func main() {
 func parseFlags() (config, error) {
 	cfg, locker := config{}, ""
 
-	flag.StringVar(&cfg.name, "name", hostname(), "identity of this replica, and holder of the lease")
+	flag.StringVar(&cfg.name, "name", defaultName(), "identity of this replica, and holder of the lease")
 	flag.StringVar(&cfg.job, "job", "invoices", "key of the job the replicas compete for")
 	flag.StringVar(&locker, "locker", string(leaseMode), "lease, or advisory for the faulty implementation")
 	flag.DurationVar(&cfg.lease, "lease", 6*time.Second, "how long a lease covers its holder")
@@ -158,11 +158,14 @@ func dsn() string {
 	return defaultDSN
 }
 
-func hostname() string {
-	name, err := os.Hostname()
+// defaultName identifies this replica. The process id is what sets two replicas started on the same
+// machine apart: sharing a holder would make them share the lease, which is reentrant by design, and
+// the demonstration would show both of them working.
+func defaultName() string {
+	host, err := os.Hostname()
 	if err != nil {
-		return "replica"
+		host = "replica"
 	}
 
-	return name
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
 }
