@@ -24,3 +24,13 @@ test:
 .PHONY: tidy
 tidy:
 	go mod tidy
+
+# The throwaway PostgreSQL the cmd/replica demonstration talks to, on the image the tests use.
+.PHONY: demo-db
+demo-db:
+	docker run -d --rm --name lease-demo -p 5432:5432 \
+		-e POSTGRES_USER=demo -e POSTGRES_PASSWORD=demo -e POSTGRES_DB=demo postgres:17-alpine
+
+.PHONY: demo-db-down
+demo-db-down:
+	docker rm -f lease-demo
