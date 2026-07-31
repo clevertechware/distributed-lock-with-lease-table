@@ -25,12 +25,12 @@ test:
 tidy:
 	go mod tidy
 
-# The throwaway PostgreSQL the cmd/replica demonstration talks to, on the image the tests use.
+# The throwaway PostgreSQL the cmd/replica demonstration talks to, described in compose.yaml.
+# --wait holds until the healthcheck passes, so the replicas never race the database startup.
 .PHONY: demo-db
 demo-db:
-	docker run -d --rm --name lease-demo -p 5432:5432 \
-		-e POSTGRES_USER=demo -e POSTGRES_PASSWORD=demo -e POSTGRES_DB=demo postgres:17-alpine
+	docker compose up -d --wait
 
 .PHONY: demo-db-down
 demo-db-down:
-	docker rm -f lease-demo
+	docker compose down

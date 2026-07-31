@@ -30,9 +30,13 @@ go run ./cmd/replica -name replica-b            # terminal 2
 make demo-db-down                               # une fois la démonstration terminée
 ```
 
+Les deux cibles enveloppent le `compose.yaml` de la racine — `docker compose up -d --wait` et
+`docker compose down` font aussi bien l'affaire. La base n'a pas de volume : chaque démonstration
+part d'une table `lease` vide.
+
 | Drapeau | Défaut | Rôle |
 |---|---|---|
-| `-name` | le nom d'hôte | l'identité du replica, et le porteur du bail |
+| `-name` | le nom d'hôte et le pid | l'identité du replica, et le porteur du bail |
 | `-job` | `invoices` | la clé du job que les replicas se disputent |
 | `-locker` | `lease` | `lease`, ou `advisory` pour l'implémentation fautive |
 | `-lease` | `6s` | la durée que couvre un bail |
