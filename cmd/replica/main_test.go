@@ -26,6 +26,25 @@ func TestAnUnknownLockerIsRejectedBeforeTheReplicaConnects(t *testing.T) {
 	assert.ErrorContains(t, err, `unknown locker "redis"`)
 }
 
+func TestEveryDurationFlagMustBePositive(t *testing.T) {
+	broken := []struct {
+		flag string
+		cfg  config
+	}{
+		{"lease", config{lease: 0, interval: time.Second, work: time.Second}},
+		{"interval", config{lease: time.Second, interval: 0, work: time.Second}},
+		{"work", config{lease: time.Second, interval: time.Second, work: -time.Second}},
+	}
+
+	for _, candidate := range broken {
+		assert.ErrorContains(t, validate(candidate.cfg), "-"+candidate.flag+" must be positive")
+	}
+}
+
+func TestTheDurationsOfTheDemonstrationAreAccepted(t *testing.T) {
+	assert.NoError(t, validate(config{lease: 6 * time.Second, interval: 2 * time.Second, work: 5 * time.Second}))
+}
+
 func TestTheDefaultNameSetsTwoReplicasOfTheSameMachineApart(t *testing.T) {
 	host, err := os.Hostname()
 	require.NoError(t, err)

@@ -88,7 +88,32 @@ func parseFlags() (config, error) {
 	}
 	cfg.locker = selected
 
+	if err = validate(cfg); err != nil {
+		return config{}, err
+	}
+
 	return cfg, nil
+}
+
+// validate rejects the durations that turn into something worse than a wrong demonstration: a tick
+// of zero panics the ticker, and a lease of zero is already expired when it is written.
+func validate(cfg config) error {
+	durations := []struct {
+		flag  string
+		value time.Duration
+	}{
+		{"lease", cfg.lease},
+		{"interval", cfg.interval},
+		{"work", cfg.work},
+	}
+
+	for _, duration := range durations {
+		if duration.value <= 0 {
+			return fmt.Errorf("-%s must be positive, got %s", duration.flag, duration.value)
+		}
+	}
+
+	return nil
 }
 
 func run(cfg config, logger *slog.Logger) error {
