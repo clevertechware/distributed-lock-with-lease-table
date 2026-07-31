@@ -4,7 +4,7 @@ name: lease-demo
 # left behind by the previous run.
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_USER: demo
       POSTGRES_PASSWORD: demo
