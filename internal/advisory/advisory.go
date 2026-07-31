@@ -12,6 +12,11 @@ import (
 	"github.com/clevertechware/distributed-lock-with-lease-table/internal/lock"
 )
 
+var (
+	_ lock.Locker = (*SessionLocker)(nil)
+	_ lock.Locker = (*PinnedLocker)(nil)
+)
+
 // ErrNotHeld is returned by PinnedLocker when PostgreSQL refuses to release a lock we do not own.
 var ErrNotHeld = errors.New("advisory lock was not held by this connection")
 
