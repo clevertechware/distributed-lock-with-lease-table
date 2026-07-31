@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -87,6 +88,24 @@ func TestAFailingJobStillGivesTheLockBack(t *testing.T) {
 	held, err := lease.NewLocker(db, lease.WithHolder("replica-2")).Lock(t.Context(), job)
 	require.NoError(t, err)
 	assert.NoError(t, held.Unlock(t.Context()))
+}
+
+func TestAJobInterruptedByTheShutdownIsNotReportedAsAFailure(t *testing.T) {
+	db, job := migratedPool(t), jobKey(t)
+	logs := &bytes.Buffer{}
+
+	ctx, shutdown := context.WithCancel(t.Context())
+	interrupted := func(ctx context.Context) error {
+		shutdown()
+
+		return ctx.Err()
+	}
+
+	locker := lease.NewLocker(db, lease.WithHolder("replica-1"), lease.WithLogger(silent))
+	New(locker, job, interrupted, WithLogger(slog.New(slog.NewTextHandler(logs, nil)))).tick(ctx)
+
+	assert.Contains(t, logs.String(), "job interrupted by the shutdown")
+	assert.NotContains(t, logs.String(), "level=ERROR")
 }
 
 func migratedPool(t *testing.T) *sql.DB {
