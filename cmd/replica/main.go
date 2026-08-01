@@ -169,9 +169,12 @@ func newLocker(ctx context.Context, cfg config, db *sql.DB, logger *slog.Logger)
 	), nil
 }
 
-// work stands for the job that must not run twice at the same time. Sleeping is enough: what the
-// demonstration shows is which replica runs it, not what it computes. It stops as soon as the replica
-// is asked to shut down, so that the lease is handed back instead of being left to expire.
+// work stands for the job that must not run twice at the same time.
+//
+// Sleeping is enough: what the demonstration shows is which replica runs it, not what it computes.
+//
+// It stops as soon as the replica is asked to shut down, so that the lease is handed back instead of being
+// left to expire.
 func work(duration time.Duration) scheduler.Job {
 	return func(ctx context.Context) error {
 		select {
@@ -191,9 +194,10 @@ func dsn() string {
 	return defaultDSN
 }
 
-// defaultName identifies this replica. The process id is what sets two replicas started on the same
-// machine apart: sharing a holder would make them share the lease, which is reentrant by design, and
-// the demonstration would show both of them working.
+// defaultName identifies this replica.
+//
+// The process id is what sets two replicas started on the same machine apart: sharing a holder would make them share
+// the lease, which is reentrant by design, and the demonstration would show both of them working.
 func defaultName() string {
 	host, err := os.Hostname()
 	if err != nil {
