@@ -1,6 +1,3 @@
-// Command replica is one instance of an application whose job must run on a single replica at a
-// time. Start it twice against the same PostgreSQL, and the logs tell you which replica works, which
-// one steps aside, and what happens when the one that works goes away.
 package main
 
 import (
@@ -54,6 +51,12 @@ type config struct {
 	work     time.Duration
 }
 
+/*
+Command replica is one instance of an application whose job must run on a single replica at a time.
+
+Start it twice against the same PostgreSQL, and the logs tell you which replica works, which one steps aside,
+and what happens when the one that works goes away.
+*/
 func main() {
 	cfg, err := parseFlags()
 	if err != nil {
@@ -88,23 +91,21 @@ func parseFlags() (config, error) {
 	}
 	cfg.locker = selected
 
-	if err = validate(cfg); err != nil {
+	if err = cfg.validate(); err != nil {
 		return config{}, err
 	}
 
 	return cfg, nil
 }
 
-// validate rejects the durations that turn into something worse than a wrong demonstration: a tick
-// of zero panics the ticker, and a lease of zero is already expired when it is written.
-func validate(cfg config) error {
+func (c config) validate() error {
 	durations := []struct {
 		flag  string
 		value time.Duration
 	}{
-		{"lease", cfg.lease},
-		{"interval", cfg.interval},
-		{"work", cfg.work},
+		{"lease", c.lease},
+		{"interval", c.interval},
+		{"work", c.work},
 	}
 
 	for _, duration := range durations {
@@ -125,6 +126,10 @@ func run(cfg config, logger *slog.Logger) error {
 		return fmt.Errorf("failed to open the pool: %w", err)
 	}
 	defer func() { _ = db.Close() }()
+	db.SetMaxOpenConns(3)
+	db.SetConnMaxLifetime(2 * time.Minute)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxIdleTime(1 * time.Minute)
 
 	if err = db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to reach postgres: %w", err)
@@ -145,11 +150,6 @@ func run(cfg config, logger *slog.Logger) error {
 
 func newLocker(ctx context.Context, cfg config, db *sql.DB, logger *slog.Logger) (lock.Locker, error) {
 	if cfg.locker == advisoryMode {
-		// The defect of the session advisory lock only surfaces once the pool recycles the connection
-		// holding the lock, which every deployment does at the end of ConnMaxLifetime. One tick is
-		// short enough for the reader to watch it happen.
-		db.SetConnMaxLifetime(cfg.interval)
-
 		return advisory.NewSessionLocker(db), nil
 	}
 
