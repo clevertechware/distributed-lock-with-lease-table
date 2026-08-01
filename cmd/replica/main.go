@@ -128,8 +128,6 @@ func run(cfg config, logger *slog.Logger) error {
 	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(3)
 	db.SetConnMaxLifetime(2 * time.Minute)
-	db.SetMaxIdleConns(2)
-	db.SetConnMaxIdleTime(1 * time.Minute)
 
 	if err = db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to reach postgres: %w", err)
@@ -142,8 +140,14 @@ func run(cfg config, logger *slog.Logger) error {
 	logger.InfoContext(ctx, "replica started",
 		slog.String("job", cfg.job), slog.String("locker", string(cfg.locker)))
 
-	scheduler.New(locker, cfg.job, work(cfg.work),
-		scheduler.WithInterval(cfg.interval), scheduler.WithLogger(logger)).Run(ctx)
+	taskScheduler := scheduler.New(
+		locker,
+		cfg.job,
+		work(cfg.work),
+		scheduler.WithInterval(cfg.interval),
+		scheduler.WithLogger(logger),
+	)
+	taskScheduler.Run(ctx)
 
 	return nil
 }
@@ -157,8 +161,12 @@ func newLocker(ctx context.Context, cfg config, db *sql.DB, logger *slog.Logger)
 		return nil, fmt.Errorf("failed to migrate the lease table: %w", err)
 	}
 
-	return lease.NewLocker(db,
-		lease.WithHolder(cfg.name), lease.WithDuration(cfg.lease), lease.WithLogger(logger)), nil
+	return lease.NewLocker(
+		db,
+		lease.WithHolder(cfg.name),
+		lease.WithDuration(cfg.lease),
+		lease.WithLogger(logger),
+	), nil
 }
 
 // work stands for the job that must not run twice at the same time. Sleeping is enough: what the

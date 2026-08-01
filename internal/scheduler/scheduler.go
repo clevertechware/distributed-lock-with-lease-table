@@ -96,8 +96,6 @@ func (s *Scheduler) tick(ctx context.Context) {
 	s.logger.InfoContext(ctx, "job started", attributes(s.key, held)...)
 
 	if err = s.job(ctx); err != nil {
-		// A replica being shut down interrupts its job on purpose. Reporting that as a failure would
-		// bury the one error worth seeing in the logs of a demonstration.
 		if ctx.Err() != nil {
 			s.logger.InfoContext(ctx, "job interrupted by the shutdown", attributes(s.key, held)...)
 

@@ -37,12 +37,12 @@ func TestEveryDurationFlagMustBePositive(t *testing.T) {
 	}
 
 	for _, candidate := range broken {
-		assert.ErrorContains(t, validate(candidate.cfg), "-"+candidate.flag+" must be positive")
+		assert.ErrorContains(t, candidate.cfg.validate(), "-"+candidate.flag+" must be positive")
 	}
 }
 
 func TestTheDurationsOfTheDemonstrationAreAccepted(t *testing.T) {
-	assert.NoError(t, validate(config{lease: 6 * time.Second, interval: 2 * time.Second, work: 5 * time.Second}))
+	assert.NoError(t, config{lease: 6 * time.Second, interval: 2 * time.Second, work: 5 * time.Second}.validate())
 }
 
 func TestTheDefaultNameSetsTwoReplicasOfTheSameMachineApart(t *testing.T) {
