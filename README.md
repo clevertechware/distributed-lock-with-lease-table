@@ -47,7 +47,7 @@ La connexion se règle par `DATABASE_URL`, et vise `make demo-db` à défaut.
 
 ### Avec le bail : un seul replica travaille
 
-Le second ne se contente pas de ne rien faire : il dit pourquoi. Le `fence` avance à chaque prise du bail, y compris
+Le second ne se contente pas de ne rien faire : il dit pourquoi. Le `fence` avance à chaque revendication, y compris
 après une libération propre : 1, puis 2, puis 3 au fil des jobs de `replica-a`.
 
 ```
@@ -66,7 +66,7 @@ Un `Ctrl-C` sur `replica-a` libère le bail au lieu de le laisser expirer, y com
 ### Ce que seul le bail rattrape : `kill -9`
 
 Un replica tué net ne libère rien. Personne ne travaille jusqu'à l'expiration du bail, puis
-`replica-b` le reprend. Le `fence` avance d'un cran, comme à chaque prise du bail ; la reprise se lit à
+`replica-b` le reprend. Le `fence` avance d'un cran, comme à chaque revendication ; la reprise se lit à
 l'absence de `job done` du porteur précédent :
 
 ```
@@ -126,7 +126,9 @@ Le verrou n'est plus un état de connexion mais une ligne : un porteur, une expi
 | Test | Ce qu'il prouve |
 |---|---|
 | `TestClaimIsRefusedWhileAnotherReplicaHoldsTheLease` | Un bail valide détenu par un autre porteur ne se vole pas : le `RETURNING` ne rend aucune ligne. |
-| `TestClaimingItsOwnValidLeaseAgainKeepsTheFence` | La revendication est réentrante : le porteur courant ne se vole pas son propre bail. |
+| `TestClaimingItsOwnValidLeaseAgainMovesTheFence` | La revendication reste permise au porteur courant, et c'est un nouveau mandat : le `fence` avance. |
+| `TestLateReleaseOfPreviousMandateLeavesTheReclaimedLeaseUntouched` | Une libération tardive du mandat précédent, revendiqué entre-temps par le même porteur sur un bail encore valide, renvoie `ErrLost` et laisse le bail courant vivant. |
+| `TestRenewByThePreviousMandateTouchesNoRowOnceTheLeaseIsReclaimed` | Le battement du mandat précédent ne prolonge rien une fois le bail revendiqué. |
 | `TestClaimTakesOverAnExpiredLeaseAndMovesTheFence` | Un bail expiré se reprend, et le `fence` avance : la discontinuité est signalée. |
 | `TestHeartbeatKeepsTheLeaseAliveWellBeyondItsDuration` | Le battement prolonge le bail bien au-delà de sa durée, sans allonger celle-ci. |
 | `TestRenewFailsOnceTheLeaseHasBeenTakenOver` | On ne prolonge pas en douce un bail qu'on a laissé filer. |
@@ -169,7 +171,8 @@ et
 
 - **Libération.** `Unlock` fait expirer le bail par un `UPDATE` au lieu de supprimer la ligne. Avec le `DELETE`, la
   ligne était réinsérée avec `fence = 1` à chaque revendication suivante, et une libération rejouée d'une exécution
-  précédente supprimait le bail de l'exécution courante. Le `fence` croît désormais à chaque prise du bail.
+  précédente supprimait le bail de l'exécution courante. Le `fence` croît désormais à chaque revendication, y compris celle d'un porteur qui
+  revendique son propre bail encore valide : `holder` identifie le replica, `fence` identifie le mandat.
 - **Scheduler.** Les deux premiers échecs consécutifs de la revendication sont journalisés en WARN, le troisième en
   ERROR. `WithoutClaimFailureDegradation` rétablit un ERROR par échec.
 
@@ -187,7 +190,7 @@ internal/pgtest     le PostgreSQL jetable et la capture des messages serveur
 ## Ce que ce projet ne fait pas
 
 Le bail **ne garantit pas l'exclusion mutuelle**, pas plus que l'advisory lock qu'il remplace. Il
-borne la fenêtre de violation et expose un `fence`, qui croît à chaque prise du bail ; la garantie n'existe que si la ressource écrite
+borne la fenêtre de violation et expose un `fence`, qui croît à chaque revendication ; la garantie n'existe que si la ressource écrite
 en aval mémorise le dernier jeton vu et rejette tout ce qui arrive avec un jeton inférieur. Cette
 vérification en aval est hors du périmètre de la démonstration, et c'est pourquoi l'article insiste
 sur l'idempotence des jobs.

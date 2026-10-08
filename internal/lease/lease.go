@@ -28,23 +28,20 @@ var ErrLost = errors.New("lease lost to another holder")
 // bounds how long a job stays stuck after a replica dies brutally.
 const DefaultDuration = 60 * time.Second
 
-// claimQuery takes the lease when it is free or expired, and does nothing otherwise. RETURNING
-// yields no row when someone else holds a still valid lease, which is the answer, not an error.
-// acquired_at and fence only move when the lease actually changes hands.
+// claimQuery takes the lease when it is free, expired, or already ours, and does nothing otherwise. RETURNING
+// yields no row when someone else holds a still valid lease, which is the answer, not an error. Every claim is a
+// new mandate: fence and acquired_at move even when the same holder claims its own valid lease again, so that
+// holder identifies the replica and fence identifies the mandate. A release or a renewal from a previous mandate
+// then matches no row. acquired_at is read after the expiry computed in VALUES, which the lease_validity
+// constraint tolerates for any duration longer than a few microseconds.
 const claimQuery = `
 INSERT INTO lease (key, holder, expires_at)
 VALUES ($1, $2, clock_timestamp() + make_interval(secs => $3))
 ON CONFLICT (key) DO UPDATE
     SET holder      = EXCLUDED.holder,
         expires_at  = EXCLUDED.expires_at,
-        acquired_at = CASE WHEN lease.holder = EXCLUDED.holder AND lease.expires_at > clock_timestamp()
-                THEN lease.acquired_at
-                ELSE clock_timestamp()
-            END,
-        fence       = CASE WHEN lease.holder = EXCLUDED.holder AND lease.expires_at > clock_timestamp()
-                THEN lease.fence
-                ELSE lease.fence + 1
-            END
+        acquired_at = clock_timestamp(),
+        fence       = lease.fence + 1
 WHERE lease.holder = EXCLUDED.holder OR lease.expires_at <= clock_timestamp()
 RETURNING fence, expires_at`
 

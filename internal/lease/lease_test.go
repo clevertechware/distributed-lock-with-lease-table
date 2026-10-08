@@ -85,7 +85,7 @@ func TestClaimIsRefusedWhileAnotherReplicaHoldsTheLease(t *testing.T) {
 	assert.ErrorIs(t, err, lock.ErrAlreadyLocked)
 }
 
-func TestClaimingItsOwnValidLeaseAgainKeepsTheFence(t *testing.T) {
+func TestClaimingItsOwnValidLeaseAgainMovesTheFence(t *testing.T) {
 	ctx, job := t.Context(), jobKey(t)
 	db := migratedPool(t)
 	locker := NewLocker(db, WithHolder("replica-1"))
@@ -93,8 +93,34 @@ func TestClaimingItsOwnValidLeaseAgainKeepsTheFence(t *testing.T) {
 	first := claim(t, locker, job)
 	second := claim(t, locker, job)
 
-	assert.Equal(t, first.Fence(), second.Fence())
+	assert.Equal(t, first.Fence()+1, second.Fence())
 	assert.NoError(t, second.Unlock(ctx))
+}
+
+func TestLateReleaseOfPreviousMandateLeavesTheReclaimedLeaseUntouched(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	locker := NewLocker(db, WithHolder("replica-1"))
+
+	first := claim(t, locker, job)
+	second := claim(t, locker, job)
+
+	assert.ErrorIs(t, first.Unlock(ctx), ErrLost)
+	assert.Equal(t, second.Fence(), currentFence(t, db, job))
+	assert.True(t, currentExpiry(t, db, job).After(time.Now()))
+}
+
+func TestRenewByThePreviousMandateTouchesNoRowOnceTheLeaseIsReclaimed(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	locker := NewLocker(db, WithHolder("replica-1"))
+
+	first := claim(t, locker, job)
+	second := claim(t, locker, job)
+	abandonHeartbeat(first)
+
+	assert.False(t, first.renew(ctx))
+	assert.Equal(t, second.Fence(), currentFence(t, db, job))
 }
 
 func TestClaimTakesOverAnExpiredLeaseAndMovesTheFence(t *testing.T) {
