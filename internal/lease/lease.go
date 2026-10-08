@@ -32,15 +32,15 @@ const DefaultDuration = 60 * time.Second
 // yields no row when someone else holds a still valid lease, which is the answer, not an error. Every claim is a
 // new mandate: fence and acquired_at move even when the same holder claims its own valid lease again, so that
 // holder identifies the replica and fence identifies the mandate. A release or a renewal from a previous mandate
-// then matches no row. acquired_at is read after the expiry computed in VALUES, which the lease_validity
-// constraint tolerates for any duration longer than a few microseconds.
+// then matches no row. acquired_at comes from the proposed row, evaluated together with expires_at before the
+// claim may wait on the row lock, so the lease_validity constraint holds however long that wait lasts.
 const claimQuery = `
 INSERT INTO lease (key, holder, expires_at)
 VALUES ($1, $2, clock_timestamp() + make_interval(secs => $3))
 ON CONFLICT (key) DO UPDATE
     SET holder      = EXCLUDED.holder,
         expires_at  = EXCLUDED.expires_at,
-        acquired_at = clock_timestamp(),
+        acquired_at = EXCLUDED.acquired_at,
         fence       = lease.fence + 1
 WHERE lease.holder = EXCLUDED.holder OR lease.expires_at <= clock_timestamp()
 RETURNING fence, expires_at`

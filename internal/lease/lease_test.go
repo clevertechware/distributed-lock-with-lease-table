@@ -70,7 +70,7 @@ func TestClaimGivesTheFirstFenceOnAFreeLease(t *testing.T) {
 	held := claim(t, NewLocker(db, WithHolder("replica-1")), job)
 
 	assert.Equal(t, int64(1), held.Fence())
-	assert.True(t, held.ExpiresAt().After(time.Now()))
+	assert.True(t, isLive(t, db, job))
 	assert.NoError(t, held.Unlock(ctx))
 }
 
@@ -107,7 +107,7 @@ func TestLateReleaseOfPreviousMandateLeavesTheReclaimedLeaseUntouched(t *testing
 
 	assert.ErrorIs(t, first.Unlock(ctx), ErrLost)
 	assert.Equal(t, second.Fence(), currentFence(t, db, job))
-	assert.True(t, currentExpiry(t, db, job).After(time.Now()))
+	assert.True(t, isLive(t, db, job))
 }
 
 func TestRenewByThePreviousMandateTouchesNoRowOnceTheLeaseIsReclaimed(t *testing.T) {
@@ -213,7 +213,7 @@ func TestReplayedReleaseOfPreviousRunLeavesCurrentLeaseUntouched(t *testing.T) {
 
 	assert.ErrorIs(t, first.Unlock(ctx), ErrLost)
 	assert.Equal(t, second.Fence(), currentFence(t, db, job))
-	assert.True(t, currentExpiry(t, db, job).After(time.Now()))
+	assert.True(t, isLive(t, db, job))
 }
 
 func TestReleasingALeaseShorterThanASecondRespectsTheValidityConstraint(t *testing.T) {
@@ -223,7 +223,7 @@ func TestReleasingALeaseShorterThanASecondRespectsTheValidityConstraint(t *testi
 	held := claim(t, NewLocker(db, WithHolder("replica-1"), WithDuration(100*time.Millisecond)), job)
 
 	assert.NoError(t, held.Unlock(ctx))
-	assert.False(t, currentExpiry(t, db, job).After(time.Now()))
+	assert.False(t, isLive(t, db, job))
 }
 
 func TestReclaimingAnExpiredLeaseInPlaceRespectsTheValidityConstraint(t *testing.T) {
@@ -253,6 +253,33 @@ func TestDownstreamFenceAcceptsTheNewHolderAfterACleanRelease(t *testing.T) {
 
 	assert.True(t, downstream.accepts(t, second.Fence()))
 	assert.False(t, downstream.accepts(t, first.Fence()))
+}
+
+func TestReclaimWaitingForTheRowLockLongerThanTheLeaseRespectsTheValidityConstraint(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	locker := NewLocker(db, WithHolder("replica-1"), WithDuration(shortLease))
+	abandonHeartbeat(claim(t, locker, job))
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `SELECT 1 FROM lease WHERE key = $1 FOR UPDATE`, job)
+	require.NoError(t, err)
+
+	reclaimed := make(chan error, 1)
+	go func() {
+		held, lockErr := locker.Lock(ctx, job)
+		if lockErr == nil {
+			t.Cleanup(func() { _ = held.Unlock(context.Background()) })
+		}
+		reclaimed <- lockErr
+	}()
+	require.Eventually(t, func() bool { return claimIsWaitingForALock(t, db) }, 2*time.Second, 10*time.Millisecond)
+	time.Sleep(2 * shortLease)
+	require.NoError(t, tx.Commit())
+
+	assert.NoError(t, <-reclaimed)
 }
 
 func TestClaimingALeaseKeepsNoConnectionOutOfThePool(t *testing.T) {
@@ -308,6 +335,28 @@ func waitUntilExpired(t *testing.T, db *sql.DB, key string) {
 
 		return expired
 	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func claimIsWaitingForALock(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+
+	const query = `SELECT count(*) > 0 FROM pg_stat_activity
+	               WHERE wait_event_type = 'Lock' AND query LIKE '%INSERT INTO lease%'`
+
+	var waiting bool
+	require.NoError(t, db.QueryRowContext(t.Context(), query).Scan(&waiting))
+
+	return waiting
+}
+
+func isLive(t *testing.T, db *sql.DB, key string) bool {
+	t.Helper()
+
+	var live bool
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		`SELECT expires_at > clock_timestamp() FROM lease WHERE key = $1`, key).Scan(&live))
+
+	return live
 }
 
 func currentFence(t *testing.T, db *sql.DB, key string) int64 {
