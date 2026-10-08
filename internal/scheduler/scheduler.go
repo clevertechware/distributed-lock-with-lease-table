@@ -14,6 +14,10 @@ import (
 // DefaultInterval is how often a replica asks whether the job is its turn.
 const DefaultInterval = 10 * time.Second
 
+// claimErrorEscalateAfter is the rank of the consecutive claim failure that is logged at ERROR. The failures before
+// it are logged at WARN: the loop claims again at the next tick, so a single failure heals before anyone could act.
+const claimErrorEscalateAfter = 3
+
 // releaseTimeout bounds the release that runs after the caller's context is already gone.
 const releaseTimeout = 5 * time.Second
 
@@ -27,6 +31,9 @@ type Scheduler struct {
 	key      string
 	interval time.Duration
 	job      Job
+
+	degradeClaimFailures bool
+	claimFailures        int
 }
 
 // Option customises a Scheduler.
@@ -42,6 +49,11 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(s *Scheduler) { s.logger = logger }
 }
 
+// WithoutClaimFailureDegradation logs every claim failure at ERROR, instead of the first ones at WARN.
+func WithoutClaimFailureDegradation() Option {
+	return func(s *Scheduler) { s.degradeClaimFailures = false }
+}
+
 // New builds the scheduler of one replica for the given job key.
 func New(locker lock.Locker, key string, job Job, opts ...Option) *Scheduler {
 	scheduler := &Scheduler{
@@ -50,6 +62,8 @@ func New(locker lock.Locker, key string, job Job, opts ...Option) *Scheduler {
 		key:      key,
 		interval: DefaultInterval,
 		job:      job,
+
+		degradeClaimFailures: true,
 	}
 	for _, opt := range opts {
 		opt(scheduler)
@@ -78,19 +92,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) tick(ctx context.Context) {
 	held, err := s.locker.Lock(ctx, s.key)
 	if errors.Is(err, lock.ErrAlreadyLocked) {
+		s.claimFailures = 0
 		s.logger.InfoContext(ctx, "job skipped, another replica holds it", slog.String("job", s.key))
 
 		return
 	}
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		s.logger.ErrorContext(ctx, "failed to claim the job",
-			slog.String("job", s.key), slog.String("error", err.Error()))
+		s.reportClaimFailure(ctx, err)
 
 		return
 	}
+	s.claimFailures = 0
 	defer s.release(ctx, held)
 
 	s.logger.InfoContext(ctx, "job started", attributes(s.key, held)...)
@@ -109,6 +121,29 @@ func (s *Scheduler) tick(ctx context.Context) {
 	}
 
 	s.logger.InfoContext(ctx, "job done", attributes(s.key, held)...)
+}
+
+// reportClaimFailure logs a claim that failed for a reason other than another replica holding the lock. A canceled
+// claim is a shutdown crossing the tick, not a failure, and ends the series like a successful one. A deadline overrun
+// is deliberately counted: it reports a locker that is too slow.
+func (s *Scheduler) reportClaimFailure(ctx context.Context, err error) {
+	if errors.Is(err, context.Canceled) {
+		s.claimFailures = 0
+
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	s.claimFailures++
+	level := slog.LevelError
+	if s.degradeClaimFailures && s.claimFailures < claimErrorEscalateAfter {
+		level = slog.LevelWarn
+	}
+
+	s.logger.Log(ctx, level, "failed to claim the job",
+		slog.String("job", s.key), slog.Int("streak", s.claimFailures), slog.String("error", err.Error()))
 }
 
 // release gives the lock back on a context of its own: a shutdown in the middle of a job must still
