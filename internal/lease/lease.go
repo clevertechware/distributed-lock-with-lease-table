@@ -58,9 +58,18 @@ UPDATE lease
    AND fence  = $3
    AND expires_at > clock_timestamp()`
 
-// releaseQuery is scoped to the holder and the fence, so that a late release cannot delete the
-// lease of the replica that legitimately took over in the meantime.
-const releaseQuery = `DELETE FROM lease WHERE key = $1 AND holder = $2 AND fence = $3`
+// releaseQuery makes the lease expire in place instead of deleting the row, so that the fence survives a clean
+// release and the next claim moves it. It is scoped to the holder and the fence, so that a late release cannot
+// touch the lease of the replica that legitimately took over in the meantime, nor the one of a later run of the
+// same replica. The expiry is set to now rather than to the past: the lease_validity constraint requires
+// expires_at to stay after acquired_at.
+const releaseQuery = `
+UPDATE lease
+   SET expires_at = clock_timestamp()
+ WHERE key    = $1
+   AND holder = $2
+   AND fence  = $3
+   AND expires_at > clock_timestamp()`
 
 // Locker claims leases on behalf of one replica.
 type Locker struct {
@@ -167,7 +176,8 @@ func (l *Lease) ExpiresAt() time.Time {
 	return l.expiresAt
 }
 
-// Unlock stops the heartbeat and deletes the lease, unless it already changed hands.
+// Unlock stops the heartbeat and makes the lease expire, keeping its row and its fence for the next claim. It
+// returns ErrLost when the lease already expired or changed hands.
 func (l *Lease) Unlock(ctx context.Context) error {
 	l.stop()
 	<-l.stopped

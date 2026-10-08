@@ -163,6 +163,72 @@ func TestUnlockFromAPreviousRunOfTheSameReplicaLeavesTheCurrentLeaseUntouched(t 
 	assert.Equal(t, reclaimed.Fence(), currentFence(t, db, job))
 }
 
+func TestCleanReleaseThenReclaimMovesTheFence(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	locker := NewLocker(db, WithHolder("replica-1"))
+
+	first := claim(t, locker, job)
+	require.NoError(t, first.Unlock(ctx))
+	second := claim(t, locker, job)
+
+	assert.Equal(t, int64(1), first.Fence())
+	assert.Equal(t, int64(2), second.Fence())
+}
+
+func TestReplayedReleaseOfPreviousRunLeavesCurrentLeaseUntouched(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	locker := NewLocker(db, WithHolder("replica-1"))
+
+	first := claim(t, locker, job)
+	require.NoError(t, first.Unlock(ctx))
+	second := claim(t, locker, job)
+
+	assert.ErrorIs(t, first.Unlock(ctx), ErrLost)
+	assert.Equal(t, second.Fence(), currentFence(t, db, job))
+	assert.True(t, currentExpiry(t, db, job).After(time.Now()))
+}
+
+func TestReleasingALeaseShorterThanASecondRespectsTheValidityConstraint(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+
+	held := claim(t, NewLocker(db, WithHolder("replica-1"), WithDuration(100*time.Millisecond)), job)
+
+	assert.NoError(t, held.Unlock(ctx))
+	assert.False(t, currentExpiry(t, db, job).After(time.Now()))
+}
+
+func TestReclaimingAnExpiredLeaseInPlaceRespectsTheValidityConstraint(t *testing.T) {
+	job := jobKey(t)
+	db := migratedPool(t)
+	locker := NewLocker(db, WithHolder("replica-1"), WithDuration(100*time.Millisecond))
+
+	abandoned := claim(t, locker, job)
+	abandonHeartbeat(abandoned)
+	waitUntilExpired(t, db, job)
+	reclaimed := claim(t, locker, job)
+
+	assert.Equal(t, abandoned.Fence()+1, reclaimed.Fence())
+	assert.True(t, currentExpiry(t, db, job).After(currentAcquiredAt(t, db, job)))
+}
+
+func TestDownstreamFenceAcceptsTheNewHolderAfterACleanRelease(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	downstream := newFencedResource(t, db)
+	locker := NewLocker(db, WithHolder("replica-1"))
+
+	first := claim(t, locker, job)
+	require.True(t, downstream.accepts(t, first.Fence()))
+	require.NoError(t, first.Unlock(ctx))
+	second := claim(t, locker, job)
+
+	assert.True(t, downstream.accepts(t, second.Fence()))
+	assert.False(t, downstream.accepts(t, first.Fence()))
+}
+
 func TestClaimingALeaseKeepsNoConnectionOutOfThePool(t *testing.T) {
 	ctx, job := t.Context(), jobKey(t)
 	db := migratedPool(t)
@@ -234,4 +300,52 @@ func currentExpiry(t *testing.T, db *sql.DB, key string) time.Time {
 	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT expires_at FROM lease WHERE key = $1`, key).Scan(&expiresAt))
 
 	return expiresAt
+}
+
+func currentAcquiredAt(t *testing.T, db *sql.DB, key string) time.Time {
+	t.Helper()
+
+	var acquiredAt time.Time
+	require.NoError(t, db.QueryRowContext(t.Context(), `SELECT acquired_at FROM lease WHERE key = $1`, key).Scan(&acquiredAt))
+
+	return acquiredAt
+}
+
+// fencedResource stands for the downstream system a job writes to: it remembers the highest fence it has seen
+// and rejects any write carrying a lower or equal one.
+type fencedResource struct {
+	db  *sql.DB
+	key string
+}
+
+func newFencedResource(t *testing.T, db *sql.DB) *fencedResource {
+	t.Helper()
+
+	const ddl = `CREATE TABLE IF NOT EXISTS fenced_resource (key TEXT PRIMARY KEY, last_fence BIGINT NOT NULL)`
+	require.NoError(t, execute(t, db, ddl))
+
+	return &fencedResource{db: db, key: jobKey(t)}
+}
+
+func (r *fencedResource) accepts(t *testing.T, fence int64) bool {
+	t.Helper()
+
+	const write = `
+INSERT INTO fenced_resource (key, last_fence) VALUES ($1, $2)
+ON CONFLICT (key) DO UPDATE SET last_fence = EXCLUDED.last_fence WHERE fenced_resource.last_fence < EXCLUDED.last_fence`
+
+	result, err := r.db.ExecContext(t.Context(), write, r.key, fence)
+	require.NoError(t, err)
+	rows, err := result.RowsAffected()
+	require.NoError(t, err)
+
+	return rows > 0
+}
+
+func execute(t *testing.T, db *sql.DB, query string) error {
+	t.Helper()
+
+	_, err := db.ExecContext(t.Context(), query)
+
+	return err
 }
