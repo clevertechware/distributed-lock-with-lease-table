@@ -141,6 +141,9 @@ Le verrou n'est plus un état de connexion mais une ligne : un porteur, une expi
 | `TestDownstreamFenceAcceptsTheNewHolderAfterACleanRelease` | Une ressource aval qui applique `WHERE last_fence < $1` accepte le nouveau porteur après une libération propre, et rejette l'ancien jeton. |
 | `TestClaimingALeaseKeepsNoConnectionOutOfThePool` | La connexion repart au pool aussitôt la revendication répondue. |
 | `TestSchemaRejectsALeaseAlreadyExpiredAtBirth` | La contrainte `lease_validity` transforme une erreur de calcul de durée en violation de contrainte. |
+| `TestMigratePurgesALeaseExpiredForLongerThanTheRetention` | La libération conserve la ligne : `Migrate` supprime au démarrage les baux expirés depuis plus de 24 h, pour que les clés des jobs disparus ne s'accumulent pas. |
+| `TestMigrateKeepsALeaseExpiredForLessThanTheRetentionAndItsFence` | Un bail expiré depuis moins de 24 h garde sa ligne et son `fence`. |
+| `TestMigrateKeepsALiveLease` | La purge ne touche pas un bail en cours. |
 | `TestMigrateRunsConcurrentlyOnEveryReplica` | La création de la table reste sérialisée par un `pg_advisory_xact_lock` : le bon outil, à la bonne portée. |
 
 ### La boucle du replica — `internal/scheduler`
@@ -164,7 +167,7 @@ regard d'un lecteur.
 
 ## Changements
 
-Deux changements font suite aux articles
+Trois changements font suite aux articles
 [*Le lease en production : ce que gocron avale*](https://www.clevertechware.fr/blog/posts/2026/le-lease-en-production-ce-que-gocron-avale)
 et
 [*Libérer un bail sans perdre le fence*](https://www.clevertechware.fr/blog/posts/2026/le-lease-en-production-liberer-sans-perdre-le-fence).
@@ -173,6 +176,8 @@ et
   ligne était réinsérée avec `fence = 1` à chaque revendication suivante, et une libération rejouée d'une exécution
   précédente supprimait le bail de l'exécution courante. Le `fence` croît désormais à chaque revendication, y compris celle d'un porteur qui
   revendique son propre bail encore valide : `holder` identifie le replica, `fence` identifie le mandat.
+- **Purge.** La ligne survit à la libération, donc la clé d'un job supprimé resterait indéfiniment. `Migrate` supprime
+  au démarrage les baux expirés depuis plus de 24 h (`Retention`). Une clé purgée puis réutilisée repart à `fence = 1`.
 - **Scheduler.** Les deux premiers échecs consécutifs de la revendication sont journalisés en WARN, le troisième en
   ERROR. `WithoutClaimFailureDegradation` rétablit un ERROR par échec.
 

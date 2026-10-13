@@ -52,6 +52,36 @@ func TestMigrateRunsConcurrentlyOnEveryReplica(t *testing.T) {
 	wg.Wait()
 }
 
+func TestMigratePurgesALeaseExpiredForLongerThanTheRetention(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	insertLeaseExpiredSince(t, db, job, Retention+time.Hour)
+
+	require.NoError(t, Migrate(ctx, db))
+
+	assert.False(t, leaseExists(t, db, job))
+}
+
+func TestMigrateKeepsALeaseExpiredForLessThanTheRetentionAndItsFence(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	insertLeaseExpiredSince(t, db, job, Retention-time.Hour)
+
+	require.NoError(t, Migrate(ctx, db))
+
+	assert.Equal(t, int64(1), currentFence(t, db, job))
+}
+
+func TestMigrateKeepsALiveLease(t *testing.T) {
+	ctx, job := t.Context(), jobKey(t)
+	db := migratedPool(t)
+	claim(t, NewLocker(db, WithHolder("replica-1")), job)
+
+	require.NoError(t, Migrate(ctx, db))
+
+	assert.True(t, isLive(t, db, job))
+}
+
 func TestSchemaRejectsALeaseAlreadyExpiredAtBirth(t *testing.T) {
 	ctx, job := t.Context(), jobKey(t)
 	db := migratedPool(t)
@@ -347,6 +377,30 @@ func claimIsWaitingForALock(t *testing.T, db *sql.DB) bool {
 	require.NoError(t, db.QueryRowContext(t.Context(), query).Scan(&waiting))
 
 	return waiting
+}
+
+// insertLeaseExpiredSince writes the row a job leaves behind once nobody claims it anymore.
+func insertLeaseExpiredSince(t *testing.T, db *sql.DB, key string, since time.Duration) {
+	t.Helper()
+
+	const insert = `
+	INSERT INTO lease (key, holder, acquired_at, expires_at)
+	VALUES ($1, 'replica-1',
+	        clock_timestamp() - make_interval(secs => $2) - interval '1 minute',
+	        clock_timestamp() - make_interval(secs => $2))`
+
+	_, err := db.ExecContext(t.Context(), insert, key, since.Seconds())
+	require.NoError(t, err)
+}
+
+func leaseExists(t *testing.T, db *sql.DB, key string) bool {
+	t.Helper()
+
+	var exists bool
+	require.NoError(t, db.QueryRowContext(t.Context(),
+		`SELECT EXISTS (SELECT 1 FROM lease WHERE key = $1)`, key).Scan(&exists))
+
+	return exists
 }
 
 func isLive(t *testing.T, db *sql.DB, key string) bool {

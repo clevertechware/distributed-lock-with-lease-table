@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"hash/fnv"
+	"time"
 )
 
 const schema = `
@@ -19,9 +20,19 @@ CREATE TABLE IF NOT EXISTS lease
     CONSTRAINT lease_validity CHECK (expires_at > acquired_at)
 )`
 
-// Migrate creates the lease table. Every replica runs it at startup, at the same time, which is
-// exactly what a transaction-scoped advisory lock is for: the section is short and the lock is
-// released by the COMMIT, without pinning a connection.
+// Retention is how long an expired lease keeps its row before Migrate purges it.
+const Retention = 24 * time.Hour
+
+// purgeQuery deletes the leases nobody claimed for longer than the retention. A release keeps the row, so the key of
+// a job that no longer exists would otherwise stay forever. The fence of a purged key starts again at 1: a downstream
+// resource that remembers the last fence of that key needs a global sequence instead.
+const purgeQuery = `
+DELETE FROM lease
+ WHERE expires_at < clock_timestamp() - make_interval(secs => $1)`
+
+// Migrate creates the lease table and purges the leases expired for longer than Retention. Every replica runs it at
+// startup, at the same time, which is exactly what a transaction-scoped advisory lock is for: the section is short
+// and the lock is released by the COMMIT, without pinning a connection.
 func Migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -34,6 +45,9 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	}
 	if _, err = tx.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("failed to create lease table: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, purgeQuery, Retention.Seconds()); err != nil {
+		return fmt.Errorf("failed to purge expired leases: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
