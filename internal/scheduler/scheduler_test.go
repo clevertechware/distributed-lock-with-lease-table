@@ -72,9 +72,9 @@ func TestTheStandbyReplicaTakesOverOnlyOnceTheHolderStops(t *testing.T) {
 	defer stopHolder()
 
 	run(t, holderCtx, newScheduler(db, "holder", job, work.job("holder", time.Minute)))
-	run(t, t.Context(), newScheduler(db, "standby", job, work.job("standby", tick)))
-
 	require.Eventually(t, ranBy(work, "holder"), longEnough, tick)
+
+	run(t, t.Context(), newScheduler(db, "standby", job, work.job("standby", tick)))
 	require.Never(t, ranBy(work, "standby"), shortEnough, tick)
 
 	stopHolder()
