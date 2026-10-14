@@ -5,10 +5,12 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/clevertechware/distributed-lock-with-lease-table/internal/lease"
 	"github.com/clevertechware/distributed-lock-with-lease-table/internal/pgtest"
+	"github.com/clevertechware/distributed-lock-with-lease-table/pkg/lock"
 )
 
 const (
@@ -69,9 +72,9 @@ func TestTheStandbyReplicaTakesOverOnlyOnceTheHolderStops(t *testing.T) {
 	defer stopHolder()
 
 	run(t, holderCtx, newScheduler(db, "holder", job, work.job("holder", time.Minute)))
-	run(t, t.Context(), newScheduler(db, "standby", job, work.job("standby", tick)))
-
 	require.Eventually(t, ranBy(work, "holder"), longEnough, tick)
+
+	run(t, t.Context(), newScheduler(db, "standby", job, work.job("standby", tick)))
 	require.Never(t, ranBy(work, "standby"), shortEnough, tick)
 
 	stopHolder()
@@ -106,6 +109,70 @@ func TestAJobInterruptedByTheShutdownIsNotReportedAsAFailure(t *testing.T) {
 
 	assert.Contains(t, logs.String(), "job interrupted by the shutdown")
 	assert.NotContains(t, logs.String(), "level=ERROR")
+}
+
+func TestTheFirstTwoConsecutiveClaimFailuresAreWarningsAndTheThirdIsAnError(t *testing.T) {
+	logs := &bytes.Buffer{}
+	locker := &scriptedLocker{outcomes: []error{errDatabaseDown, errDatabaseDown, errDatabaseDown, errDatabaseDown}}
+
+	tickAll(t, locker, logs)
+
+	assert.Equal(t, []string{"WARN", "WARN", "ERROR", "ERROR"}, claimFailureLevels(logs))
+}
+
+func TestASuccessfulClaimRestartsTheFailureSeries(t *testing.T) {
+	logs := &bytes.Buffer{}
+	locker := &scriptedLocker{outcomes: []error{errDatabaseDown, errDatabaseDown, nil, errDatabaseDown}}
+
+	tickAll(t, locker, logs)
+
+	assert.Equal(t, []string{"WARN", "WARN", "WARN"}, claimFailureLevels(logs))
+}
+
+func TestAClaimRefusedBecauseAnotherReplicaHoldsTheLockRestartsTheFailureSeries(t *testing.T) {
+	logs := &bytes.Buffer{}
+	locker := &scriptedLocker{outcomes: []error{errDatabaseDown, errDatabaseDown, lock.ErrAlreadyLocked, errDatabaseDown}}
+
+	tickAll(t, locker, logs)
+
+	assert.Equal(t, []string{"WARN", "WARN", "WARN"}, claimFailureLevels(logs))
+}
+
+func TestACanceledClaimIsNotLoggedAndRestartsTheFailureSeries(t *testing.T) {
+	logs := &bytes.Buffer{}
+	locker := &scriptedLocker{outcomes: []error{errDatabaseDown, errDatabaseDown, context.Canceled, errDatabaseDown}}
+
+	tickAll(t, locker, logs)
+
+	assert.Equal(t, []string{"WARN", "WARN", "WARN"}, claimFailureLevels(logs))
+}
+
+func TestAClaimThatExceededItsDeadlineCountsInTheFailureSeries(t *testing.T) {
+	logs := &bytes.Buffer{}
+	deadline := fmt.Errorf("claim timed out: %w", context.DeadlineExceeded)
+	locker := &scriptedLocker{outcomes: []error{deadline, deadline, deadline}}
+
+	tickAll(t, locker, logs)
+
+	assert.Equal(t, []string{"WARN", "WARN", "ERROR"}, claimFailureLevels(logs))
+}
+
+func TestEveryClaimFailureIsAnErrorWhenTheDegradationIsDisabled(t *testing.T) {
+	logs := &bytes.Buffer{}
+	locker := &scriptedLocker{outcomes: []error{errDatabaseDown, errDatabaseDown}}
+
+	tickAll(t, locker, logs, WithoutClaimFailureDegradation())
+
+	assert.Equal(t, []string{"ERROR", "ERROR"}, claimFailureLevels(logs))
+}
+
+func TestTheClaimFailureLogCarriesTheLengthOfTheSeries(t *testing.T) {
+	logs := &bytes.Buffer{}
+	locker := &scriptedLocker{outcomes: []error{errDatabaseDown, errDatabaseDown}}
+
+	tickAll(t, locker, logs)
+
+	assert.Contains(t, logs.String(), "streak=2")
 }
 
 func migratedPool(t *testing.T) *sql.DB {
@@ -202,4 +269,54 @@ func (r *recorder) started() []string {
 
 func (r *recorder) ranAtAll() bool {
 	return len(r.started()) > 0
+}
+
+var errDatabaseDown = errors.New("connection refused")
+
+// scriptedLocker answers each claim with the next outcome: nil is a successful claim.
+type scriptedLocker struct {
+	outcomes []error
+	claimed  int
+}
+
+func (l *scriptedLocker) Lock(context.Context, string) (lock.Lock, error) {
+	outcome := l.outcomes[l.claimed]
+	l.claimed++
+	if outcome != nil {
+		return nil, outcome
+	}
+
+	return releasedImmediately{}, nil
+}
+
+type releasedImmediately struct{}
+
+func (releasedImmediately) Unlock(context.Context) error { return nil }
+
+func tickAll(t *testing.T, locker *scriptedLocker, logs *bytes.Buffer, opts ...Option) {
+	t.Helper()
+
+	job := func(context.Context) error { return nil }
+	logger := slog.New(slog.NewTextHandler(logs, nil))
+	scheduler := New(locker, "nightly-reconciliation", job, append([]Option{WithLogger(logger)}, opts...)...)
+
+	for range locker.outcomes {
+		scheduler.tick(t.Context())
+	}
+}
+
+func claimFailureLevels(logs *bytes.Buffer) []string {
+	var levels []string
+	for line := range strings.Lines(logs.String()) {
+		if !strings.Contains(line, "failed to claim the job") {
+			continue
+		}
+		for field := range strings.FieldsSeq(line) {
+			if level, found := strings.CutPrefix(field, "level="); found {
+				levels = append(levels, level)
+			}
+		}
+	}
+
+	return levels
 }

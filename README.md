@@ -47,13 +47,17 @@ La connexion se règle par `DATABASE_URL`, et vise `make demo-db` à défaut.
 
 ### Avec le bail : un seul replica travaille
 
-Le second ne se contente pas de ne rien faire : il dit pourquoi.
+Le second ne se contente pas de ne rien faire : il dit pourquoi. Le `fence` avance à chaque revendication, y compris
+après une libération propre : 1, puis 2, puis 3 au fil des jobs de `replica-a`.
 
 ```
-time=…T22:17:40 level=INFO msg="job started" replica=replica-a job=invoices fence=1
-time=…T22:17:40 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
-time=…T22:17:42 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
-time=…T22:17:45 level=INFO msg="job done" replica=replica-a job=invoices fence=1
+time=…T15:19:14 level=INFO msg="job started" replica=replica-a job=invoices fence=1
+time=…T15:19:14 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
+time=…T15:19:16 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
+time=…T15:19:19 level=INFO msg="job done" replica=replica-a job=invoices fence=1
+time=…T15:19:19 level=INFO msg="job started" replica=replica-a job=invoices fence=2
+time=…T15:19:24 level=INFO msg="job done" replica=replica-a job=invoices fence=2
+time=…T15:19:24 level=INFO msg="job started" replica=replica-a job=invoices fence=3
 ```
 
 Un `Ctrl-C` sur `replica-a` libère le bail au lieu de le laisser expirer, y compris en plein job :
@@ -62,13 +66,15 @@ Un `Ctrl-C` sur `replica-a` libère le bail au lieu de le laisser expirer, y com
 ### Ce que seul le bail rattrape : `kill -9`
 
 Un replica tué net ne libère rien. Personne ne travaille jusqu'à l'expiration du bail, puis
-`replica-b` le reprend — et le `fence` a bougé, ce qui est précisément le signal d'une reprise :
+`replica-b` le reprend. Le `fence` avance d'un cran, comme à chaque revendication ; la reprise se lit à
+l'absence de `job done` du porteur précédent :
 
 ```
-time=…T22:21:24 (kill -9 replica-a, en plein job, fence=1)
-time=…T22:21:26 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
-time=…T22:21:28 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
-time=…T22:21:30 level=INFO msg="job started" replica=replica-b job=invoices fence=2
+time=…T15:19:56 level=INFO msg="job started" replica=replica-a job=invoices fence=2
+time=…T15:19:59 (kill -9 replica-a, en plein job, fence=2)
+time=…T15:20:01 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
+time=…T15:20:03 level=INFO msg="job skipped, another replica holds it" replica=replica-b job=invoices
+time=…T15:20:05 level=INFO msg="job started" replica=replica-b job=invoices fence=3
 ```
 
 Six secondes de job non exécuté : c'est le prix du `-lease`, et le seul chiffre à régler.
@@ -120,14 +126,24 @@ Le verrou n'est plus un état de connexion mais une ligne : un porteur, une expi
 | Test | Ce qu'il prouve |
 |---|---|
 | `TestClaimIsRefusedWhileAnotherReplicaHoldsTheLease` | Un bail valide détenu par un autre porteur ne se vole pas : le `RETURNING` ne rend aucune ligne. |
-| `TestClaimingItsOwnValidLeaseAgainKeepsTheFence` | La revendication est réentrante : le porteur courant ne se vole pas son propre bail. |
+| `TestClaimingItsOwnValidLeaseAgainMovesTheFence` | La revendication reste permise au porteur courant, et c'est un nouveau mandat : le `fence` avance. |
+| `TestLateReleaseOfPreviousMandateLeavesTheReclaimedLeaseUntouched` | Une libération tardive du mandat précédent, revendiqué entre-temps par le même porteur sur un bail encore valide, renvoie `ErrLost` et laisse le bail courant vivant. |
+| `TestRenewByThePreviousMandateTouchesNoRowOnceTheLeaseIsReclaimed` | Le battement du mandat précédent ne prolonge rien une fois le bail revendiqué. |
 | `TestClaimTakesOverAnExpiredLeaseAndMovesTheFence` | Un bail expiré se reprend, et le `fence` avance : la discontinuité est signalée. |
 | `TestHeartbeatKeepsTheLeaseAliveWellBeyondItsDuration` | Le battement prolonge le bail bien au-delà de sa durée, sans allonger celle-ci. |
 | `TestRenewFailsOnceTheLeaseHasBeenTakenOver` | On ne prolonge pas en douce un bail qu'on a laissé filer. |
 | `TestUnlockLeavesTheLeaseOfTheReplicaThatTookOverUntouched` | Un `Unlock` tardif ne supprime pas le bail du replica qui travaille légitimement. |
-| `TestUnlockFromAPreviousRunOfTheSameReplicaLeavesTheCurrentLeaseUntouched` | Le dernier interstice, celui que seul le `fence` ferme : même clé, même porteur, exécution précédente. |
+| `TestUnlockFromAPreviousRunOfTheSameReplicaLeavesTheCurrentLeaseUntouched` | Un `Unlock` d'une exécution précédente, après expiration, ne touche pas le bail revendiqué depuis par le même porteur : le `fence` diffère. |
+| `TestCleanReleaseThenReclaimMovesTheFence` | La libération fait expirer le bail sur place au lieu de supprimer la ligne : la revendication suivante donne le `fence` 2. |
+| `TestReplayedReleaseOfPreviousRunLeavesCurrentLeaseUntouched` | Une libération rejouée après une libération propre et une nouvelle revendication du même porteur renvoie `ErrLost`, et le bail courant reste vivant. |
+| `TestReleasingALeaseShorterThanASecondRespectsTheValidityConstraint` | La libération d'un bail de moins d'une seconde ne viole pas `lease_validity`. |
+| `TestReclaimingAnExpiredLeaseInPlaceRespectsTheValidityConstraint` | La revendication d'un bail expiré sur la même ligne garde `expires_at` après `acquired_at`. |
+| `TestDownstreamFenceAcceptsTheNewHolderAfterACleanRelease` | Une ressource aval qui applique `WHERE last_fence < $1` accepte le nouveau porteur après une libération propre, et rejette l'ancien jeton. |
 | `TestClaimingALeaseKeepsNoConnectionOutOfThePool` | La connexion repart au pool aussitôt la revendication répondue. |
 | `TestSchemaRejectsALeaseAlreadyExpiredAtBirth` | La contrainte `lease_validity` transforme une erreur de calcul de durée en violation de contrainte. |
+| `TestMigratePurgesALeaseExpiredForLongerThanTheRetention` | La libération conserve la ligne : `Migrate` supprime au démarrage les baux expirés depuis plus de 24 h, pour que les clés des jobs disparus ne s'accumulent pas. |
+| `TestMigrateKeepsALeaseExpiredForLessThanTheRetentionAndItsFence` | Un bail expiré depuis moins de 24 h garde sa ligne et son `fence`. |
+| `TestMigrateKeepsALiveLease` | La purge ne touche pas un bail en cours. |
 | `TestMigrateRunsConcurrentlyOnEveryReplica` | La création de la table reste sérialisée par un `pg_advisory_xact_lock` : le bon outil, à la bonne portée. |
 
 ### La boucle du replica — `internal/scheduler`
@@ -141,6 +157,29 @@ regard d'un lecteur.
 | `TestTheStandbyReplicaTakesOverOnlyOnceTheHolderStops` | Le second attend son tour tant que le premier travaille, et le prend dès qu'il s'arrête. |
 | `TestAFailingJobStillGivesTheLockBack` | Un job qui échoue rend le verrou : l'échec ne bloque pas les tours suivants. |
 | `TestAJobInterruptedByTheShutdownIsNotReportedAsAFailure` | Un arrêt en plein job n'est pas une panne, et n'a rien à faire dans les erreurs. |
+| `TestTheFirstTwoConsecutiveClaimFailuresAreWarningsAndTheThirdIsAnError` | Les deux premiers échecs consécutifs de la revendication sont journalisés en WARN, le troisième et les suivants en ERROR. |
+| `TestASuccessfulClaimRestartsTheFailureSeries` | Une revendication réussie remet la série à zéro. |
+| `TestAClaimRefusedBecauseAnotherReplicaHoldsTheLockRestartsTheFailureSeries` | `ErrAlreadyLocked` remet la série à zéro. |
+| `TestACanceledClaimIsNotLoggedAndRestartsTheFailureSeries` | `context.Canceled` n'est pas journalisé et remet la série à zéro. |
+| `TestAClaimThatExceededItsDeadlineCountsInTheFailureSeries` | `context.DeadlineExceeded` compte dans la série : un locker trop lent doit apparaître. |
+| `TestEveryClaimFailureIsAnErrorWhenTheDegradationIsDisabled` | `WithoutClaimFailureDegradation` rétablit un ERROR par échec. |
+| `TestTheClaimFailureLogCarriesTheLengthOfTheSeries` | Le journal porte l'attribut `streak`. |
+
+## Changements
+
+Trois changements font suite aux articles
+[*Le lease en production : ce que gocron avale*](https://www.clevertechware.fr/blog/posts/2026/le-lease-en-production-ce-que-gocron-avale)
+et
+[*Libérer un bail sans perdre le fence*](https://www.clevertechware.fr/blog/posts/2026/le-lease-en-production-liberer-sans-perdre-le-fence).
+
+- **Libération.** `Unlock` fait expirer le bail par un `UPDATE` au lieu de supprimer la ligne. Avec le `DELETE`, la
+  ligne était réinsérée avec `fence = 1` à chaque revendication suivante, et une libération rejouée d'une exécution
+  précédente supprimait le bail de l'exécution courante. Le `fence` croît désormais à chaque revendication, y compris celle d'un porteur qui
+  revendique son propre bail encore valide : `holder` identifie le replica, `fence` identifie le mandat.
+- **Purge.** La ligne survit à la libération, donc la clé d'un job supprimé resterait indéfiniment. `Migrate` supprime
+  au démarrage les baux expirés depuis plus de 24 h (`Retention`). Une clé purgée puis réutilisée repart à `fence = 1`.
+- **Scheduler.** Les deux premiers échecs consécutifs de la revendication sont journalisés en WARN, le troisième en
+  ERROR. `WithoutClaimFailureDegradation` rétablit un ERROR par échec.
 
 ## Organisation
 
@@ -156,7 +195,7 @@ internal/pgtest     le PostgreSQL jetable et la capture des messages serveur
 ## Ce que ce projet ne fait pas
 
 Le bail **ne garantit pas l'exclusion mutuelle**, pas plus que l'advisory lock qu'il remplace. Il
-borne la fenêtre de violation et expose un `fence` ; la garantie n'existe que si la ressource écrite
+borne la fenêtre de violation et expose un `fence`, qui croît à chaque revendication ; la garantie n'existe que si la ressource écrite
 en aval mémorise le dernier jeton vu et rejette tout ce qui arrive avec un jeton inférieur. Cette
 vérification en aval est hors du périmètre de la démonstration, et c'est pourquoi l'article insiste
 sur l'idempotence des jobs.
