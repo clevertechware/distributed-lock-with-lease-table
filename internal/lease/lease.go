@@ -24,16 +24,13 @@ var (
 // took it over.
 var ErrLost = errors.New("lease lost to another holder")
 
-// DefaultDuration is how long a claim covers the holder. It is the only figure worth tuning: it
-// bounds how long a job stays stuck after a replica dies brutally.
+// DefaultDuration is how long a claim covers the holder. It bounds how long a job stays stuck after a replica dies.
 const DefaultDuration = 60 * time.Second
 
-// claimQuery takes the lease when it is free, expired, or already ours, and does nothing otherwise. RETURNING
-// yields no row when someone else holds a still valid lease, which is the answer, not an error. Every claim is a
-// new mandate: fence and acquired_at move even when the same holder claims its own valid lease again, so that
-// holder identifies the replica and fence identifies the mandate. A release or a renewal from a previous mandate
-// then matches no row. acquired_at comes from the proposed row, evaluated together with expires_at before the
-// claim may wait on the row lock, so the lease_validity constraint holds however long that wait lasts.
+// claimQuery takes the lease when it is free, expired, or already ours, and returns no row otherwise. Every claim,
+// reentrant ones included, moves fence and acquired_at, so that a release or a renewal from a previous mandate
+// matches no row. acquired_at comes from the proposed row, evaluated before the claim may wait on the row lock, so
+// the lease_validity constraint holds however long that wait lasts.
 const claimQuery = `
 INSERT INTO lease (key, holder, expires_at)
 VALUES ($1, $2, clock_timestamp() + make_interval(secs => $3))
@@ -45,8 +42,8 @@ ON CONFLICT (key) DO UPDATE
 WHERE lease.holder = EXCLUDED.holder OR lease.expires_at <= clock_timestamp()
 RETURNING fence, expires_at`
 
-// renewQuery reads as a single question: am I still the legitimate holder of this lease? An
-// expired lease is not extended, because taking it back over has to move the fence.
+// renewQuery extends the lease only while it is still ours and valid: taking an expired lease back over has to
+// move the fence.
 const renewQuery = `
 UPDATE lease
    SET expires_at = clock_timestamp() + make_interval(secs => $4)
@@ -55,11 +52,9 @@ UPDATE lease
    AND fence  = $3
    AND expires_at > clock_timestamp()`
 
-// releaseQuery makes the lease expire in place instead of deleting the row, so that the fence survives a clean
-// release and the next claim moves it. It is scoped to the holder and the fence, so that a late release cannot
-// touch the lease of the replica that legitimately took over in the meantime, nor the one of a later run of the
-// same replica. The expiry is set to now rather than to the past: the lease_validity constraint requires
-// expires_at to stay after acquired_at.
+// releaseQuery makes the lease expire in place, so that the fence survives and the next claim moves it. Scoping it
+// to the holder and the fence keeps a late release away from whoever took over since. The expiry is set to now
+// rather than the past because lease_validity requires expires_at to stay after acquired_at.
 const releaseQuery = `
 UPDATE lease
    SET expires_at = clock_timestamp()

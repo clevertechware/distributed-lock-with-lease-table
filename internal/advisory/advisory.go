@@ -25,9 +25,8 @@ const (
 	unlockQuery  = "SELECT pg_advisory_unlock($1)"
 )
 
-// hashKey projects a business key onto the numeric key space advisory locks require.
-// A 32-bit hash keeps the value within the positive range of a bigint, so the same key
-// always maps to the same lock, whatever the replica and whatever the PostgreSQL version.
+// hashKey maps a business key onto the bigint key space of advisory locks. A 32-bit hash stays positive and maps
+// a key to the same lock on every replica and PostgreSQL version.
 func hashKey(key string) int64 {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
@@ -46,8 +45,7 @@ func NewSessionLocker(db *sql.DB) *SessionLocker {
 	return &SessionLocker{db: db}
 }
 
-// Lock tries to reserve the job. If another replica already holds it,
-// we return ErrAlreadyLocked and the scheduler simply skips its turn.
+// Lock tries to reserve the job, and returns ErrAlreadyLocked when another replica holds it.
 func (l *SessionLocker) Lock(ctx context.Context, key string) (lock.Lock, error) {
 	hash := hashKey(key)
 

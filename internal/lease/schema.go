@@ -30,9 +30,9 @@ const purgeQuery = `
 DELETE FROM lease
  WHERE expires_at < clock_timestamp() - make_interval(secs => $1)`
 
-// Migrate creates the lease table and purges the leases expired for longer than Retention. Every replica runs it at
-// startup, at the same time, which is exactly what a transaction-scoped advisory lock is for: the section is short
-// and the lock is released by the COMMIT, without pinning a connection.
+// Migrate creates the lease table and purges the leases expired for longer than Retention. Every replica runs it
+// at startup, so it runs under a transaction-scoped advisory lock: the COMMIT releases it without pinning a
+// connection.
 func Migrate(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
