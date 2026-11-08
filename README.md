@@ -125,6 +125,7 @@ Le verrou n'est plus un état de connexion mais une ligne : un porteur, une expi
 
 | Test | Ce qu'il prouve |
 |---|---|
+| `TestClaimGivesTheFirstFenceOnAFreeLease` | La première revendication d'une clé libre donne le `fence` 1. |
 | `TestClaimIsRefusedWhileAnotherReplicaHoldsTheLease` | Un bail valide détenu par un autre porteur ne se vole pas : le `RETURNING` ne rend aucune ligne. |
 | `TestClaimingItsOwnValidLeaseAgainMovesTheFence` | La revendication reste permise au porteur courant, et c'est un nouveau mandat : le `fence` avance. |
 | `TestLateReleaseOfPreviousMandateLeavesTheReclaimedLeaseUntouched` | Une libération tardive du mandat précédent, revendiqué entre-temps par le même porteur sur un bail encore valide, renvoie `ErrLost` et laisse le bail courant vivant. |
@@ -138,6 +139,7 @@ Le verrou n'est plus un état de connexion mais une ligne : un porteur, une expi
 | `TestReplayedReleaseOfPreviousRunLeavesCurrentLeaseUntouched` | Une libération rejouée après une libération propre et une nouvelle revendication du même porteur renvoie `ErrLost`, et le bail courant reste vivant. |
 | `TestReleasingALeaseShorterThanASecondRespectsTheValidityConstraint` | La libération d'un bail de moins d'une seconde ne viole pas `lease_validity`. |
 | `TestReclaimingAnExpiredLeaseInPlaceRespectsTheValidityConstraint` | La revendication d'un bail expiré sur la même ligne garde `expires_at` après `acquired_at`. |
+| `TestReclaimWaitingForTheRowLockLongerThanTheLeaseRespectsTheValidityConstraint` | Une revendication qui attend le verrou de ligne plus longtemps que la durée du bail respecte `lease_validity` : `acquired_at` vient de la ligne proposée. |
 | `TestDownstreamFenceAcceptsTheNewHolderAfterACleanRelease` | Une ressource aval qui applique `WHERE last_fence < $1` accepte le nouveau porteur après une libération propre, et rejette l'ancien jeton. |
 | `TestClaimingALeaseKeepsNoConnectionOutOfThePool` | La connexion repart au pool aussitôt la revendication répondue. |
 | `TestSchemaRejectsALeaseAlreadyExpiredAtBirth` | La contrainte `lease_validity` transforme une erreur de calcul de durée en violation de contrainte. |
@@ -170,12 +172,14 @@ regard d'un lecteur.
 Trois changements font suite aux articles
 [*Le lease en production : ce que gocron avale*](https://www.clevertechware.fr/blog/posts/2026/le-lease-en-production-ce-que-gocron-avale)
 et
-[*Libérer un bail sans perdre le fence*](https://www.clevertechware.fr/blog/posts/2026/le-lease-en-production-liberer-sans-perdre-le-fence).
+[*Le lease en production : libérer un bail sans perdre le fence*](https://www.clevertechware.fr/blog/posts/2026/le-lease-en-production-liberer-sans-perdre-le-fence).
 
 - **Libération.** `Unlock` fait expirer le bail par un `UPDATE` au lieu de supprimer la ligne. Avec le `DELETE`, la
   ligne était réinsérée avec `fence = 1` à chaque revendication suivante, et une libération rejouée d'une exécution
   précédente supprimait le bail de l'exécution courante. Le `fence` croît désormais à chaque revendication, y compris celle d'un porteur qui
   revendique son propre bail encore valide : `holder` identifie le replica, `fence` identifie le mandat.
+  `acquired_at` vient de la ligne proposée (`EXCLUDED.acquired_at`) : une revendication qui attend le verrou de ligne
+  plus longtemps que la durée du bail ne viole plus `lease_validity` (SQLSTATE 23514).
 - **Purge.** La ligne survit à la libération, donc la clé d'un job supprimé resterait indéfiniment. `Migrate` supprime
   au démarrage les baux expirés depuis plus de 24 h (`Retention`). Une clé purgée puis réutilisée repart à `fence = 1`.
 - **Scheduler.** Les deux premiers échecs consécutifs de la revendication sont journalisés en WARN, le troisième en
