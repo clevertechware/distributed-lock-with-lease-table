@@ -64,7 +64,8 @@ func TestOrphanedLockIsSilentlyReleasedWhenThePoolRecyclesTheConnection(t *testi
 
 	recycleIdleConnections(replicaOne)
 
-	require.False(t, advisoryLockIsHeld(t, replicaTwo, job), "closing the connection released the lock, without a word")
+	require.Eventually(t, func() bool { return !advisoryLockIsHeld(t, replicaTwo, job) }, 2*time.Second,
+		10*time.Millisecond, "closing the connection released the lock, without a word")
 
 	_, err = NewSessionLocker(replicaTwo).Lock(ctx, job)
 	assert.NoError(t, err, "the second replica now runs the very same job, while the first one still believes it holds the lock")
@@ -133,7 +134,7 @@ func holdIdleConnection(t *testing.T, db *sql.DB) *sql.Conn {
 }
 
 // recycleIdleConnections closes every idle connection, as the pool does on its own once
-// ConnMaxLifetime is reached.
+// ConnMaxLifetime is reached. The server backend exits asynchronously, so its locks disappear shortly after.
 func recycleIdleConnections(db *sql.DB) {
 	db.SetMaxIdleConns(0)
 	db.SetMaxIdleConns(2)
